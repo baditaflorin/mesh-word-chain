@@ -1,0 +1,8 @@
+steps:
+  verify:
+    image: node:22-alpine
+    commands:
+      - npm ci
+      - npm run fmt:check
+      - npm run typecheck
+      - npm run smoke
