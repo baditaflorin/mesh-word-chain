@@ -10,7 +10,9 @@ const baseURL = `http://localhost:${PORT}/${appName}/`;
 
 export default defineConfig({
   testDir: "./tests/e2e",
-  timeout: 30_000,
+  // The included memory-leak check intentionally runs for 60 seconds.
+  // Keep the suite-level timeout above that default so it can finish.
+  timeout: Number(process.env["PLAYWRIGHT_TEST_TIMEOUT_MS"] ?? 90_000),
   expect: { timeout: 5_000 },
   fullyParallel: false,
   reporter: process.env["CI"] ? "list" : [["list"], ["json", { outputFile: "test-results.json" }]],
