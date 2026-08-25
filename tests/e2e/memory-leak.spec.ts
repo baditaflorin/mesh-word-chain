@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { expect, test, type Page } from "@playwright/test";
 
 /**
  * Long-running room leak detector. Boots two peers, runs the generic
@@ -22,10 +23,31 @@ import { test, expect } from "@playwright/test";
 const DURATION = Number(process.env.MESH_LEAK_DURATION_MS ?? 60_000);
 const BUDGET_MB = Number(process.env.MESH_LEAK_BUDGET_MB ?? 15);
 const NOISE_OPS = Number(process.env.MESH_LEAK_NOISE_OPS ?? 200);
+const ENABLED = process.env.MESH_RUN_LEAK_TEST === "1";
+const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as {
+  name: string;
+};
+const APP_NAME = pkg.name;
+
+async function closeInitiallyOpenSettings(page: Page): Promise<void> {
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  if (!(await settings.isVisible().catch(() => false))) return;
+  const close = settings.getByRole("button", { name: "close" });
+  if (await close.isVisible().catch(() => false)) {
+    await close.click();
+  } else {
+    await page.keyboard.press("Escape");
+  }
+  await expect(settings).toBeHidden();
+}
 
 test("memory leak — heap growth stays under budget over a long-running room", async ({
   browser,
 }) => {
+  // Keep the expensive detector opt-in. It is deliberately installed with
+  // `test:e2e`, but only `npm run test:leak` enables its 60-second run.
+  test.skip(!ENABLED, "run with `npm run test:leak`");
+  test.setTimeout(Math.max(30_000, DURATION + 15_000));
   const ctx = await browser.newContext();
   await ctx.addInitScript(
     ({ prefix, room }) => {
@@ -35,15 +57,18 @@ test("memory leak — heap growth stays under budget over a long-running room", 
         /* private mode */
       }
     },
-    { prefix: "mesh-word-chain", room: `leak-${Date.now()}` },
+    { prefix: APP_NAME, room: `leak-${Date.now()}` },
   );
 
   const a = await ctx.newPage();
   const b = await ctx.newPage();
   await Promise.all([
-    a.goto("/mesh-word-chain/", { waitUntil: "domcontentloaded" }),
-    b.goto("/mesh-word-chain/", { waitUntil: "domcontentloaded" }),
+    a.goto(`/${APP_NAME}/`, { waitUntil: "domcontentloaded" }),
+    b.goto(`/${APP_NAME}/`, { waitUntil: "domcontentloaded" }),
   ]);
+  // Make the noise loop exercise the app surface, not a first-visit Settings
+  // overlay which intentionally intercepts background pointer events.
+  await Promise.all([closeInitiallyOpenSettings(a), closeInitiallyOpenSettings(b)]);
 
   // Settle the initial mount + first GC opportunity.
   await a.waitForTimeout(1500);
@@ -86,7 +111,14 @@ async function measureHeap(page: import("@playwright/test").Page): Promise<numbe
 }
 
 async function clickAnything(page: import("@playwright/test").Page): Promise<void> {
-  const btn = page.locator("button:visible").first();
+  const btn = page.locator("button:not([disabled]):not([aria-disabled='true']):visible").first();
   if ((await btn.count()) === 0) return;
-  await btn.click({ trial: false, timeout: 2000 }).catch(() => undefined);
+  // Dispatch directly instead of using Playwright's actionability wait. The
+  // probe needs to exercise the application's handler, not assert that every
+  // stateful control remains actionable while two peers churn concurrently.
+  // This keeps a short accelerated leak gate bounded for controls that
+  // intentionally disappear or rerender after their first click.
+  await btn
+    .evaluate((element: HTMLButtonElement) => element.click(), undefined, { timeout: 500 })
+    .catch(() => undefined);
 }
