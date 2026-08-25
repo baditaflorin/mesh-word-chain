@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { expect, test, type Page } from "@playwright/test";
 
 /**
  * Local performance budget — fails the smoke run if the app's LCP or INP
@@ -15,12 +16,28 @@ import { test, expect } from "@playwright/test";
 const LCP_MS = Number(process.env.MESH_BUDGET_LCP_MS ?? 2500);
 const INP_MS = Number(process.env.MESH_BUDGET_INP_MS ?? 300);
 const TBT_MS = Number(process.env.MESH_BUDGET_TBT_MS ?? 600);
+const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as {
+  name: string;
+};
+const APP_NAME = pkg.name;
+
+async function closeInitiallyOpenSettings(page: Page): Promise<void> {
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  if (!(await settings.isVisible().catch(() => false))) return;
+  const close = settings.getByRole("button", { name: "close" });
+  if (await close.isVisible().catch(() => false)) {
+    await close.click();
+  } else {
+    await page.keyboard.press("Escape");
+  }
+  await expect(settings).toBeHidden();
+}
 
 test("perf budget — LCP + TBT under threshold on cold load", async ({ page }) => {
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("Performance.enable");
 
-  await page.goto("/mesh-word-chain/", { waitUntil: "domcontentloaded" });
+  await page.goto(`/${APP_NAME}/`, { waitUntil: "domcontentloaded" });
 
   // PerformanceObserver-based LCP capture. We resolve as soon as the first
   // post-interactive LCP entry lands, with a 6s overall cap.
@@ -63,11 +80,15 @@ test("perf budget — LCP + TBT under threshold on cold load", async ({ page }) 
 });
 
 test("perf budget — INP under threshold after one interaction", async ({ page }) => {
-  await page.goto("/mesh-word-chain/", { waitUntil: "domcontentloaded" });
+  await page.goto(`/${APP_NAME}/`, { waitUntil: "domcontentloaded" });
+  // A first-visit Settings dialog correctly traps pointer events. Dismiss it
+  // before choosing a representative app interaction, rather than attempting
+  // to click a visible-but-inert control behind its overlay.
+  await closeInitiallyOpenSettings(page);
 
   // Pick whatever's clickable; the budget cares about *any* interaction's
   // INP, not a specific feature. If nothing is clickable we pass trivially.
-  const button = page.locator("button:visible").first();
+  const button = page.locator("button:not([disabled]):not([aria-disabled='true']):visible").first();
   if ((await button.count()) === 0) {
     test.info().annotations.push({ type: "skip", description: "no visible buttons" });
     return;
